@@ -1,0 +1,19 @@
+{
+  "name": "forge-web",
+  "version": "0.1.0",
+  "description": "HTTP server, JSON, OAuth building blocks and signed JWTs for Forge.",
+  "repository_url": "https://github.com/Helloworld0822/forge-web",
+  "module": "web.fg",
+  "license": "MIT",
+  "dependencies": {},
+  "native": {
+    "library": "forge_web",
+    "cmake_target": "forge_web",
+    "pkg_config": [
+      "libmicrohttpd",
+      "json-c",
+      "libcurl",
+      "openssl"
+    ]
+  }
+}
