@@ -1,0 +1,195 @@
+extern fn fw_has(value: int, key: string): int;
+extern fn fw_cookie(request: int, name: string): string;
+extern fn fw_set_cookie(request: int, name: string, value: string, age: int, secure: int): int;
+extern fn fw_normalize_ip(value: string): string;
+extern fn fw_sort(array: int, key: string): int;
+extern fn fw_fetch_many(urls: int, bearer: string): int;
+extern fn fw_scope_begin(): int;
+extern fn fw_scope_end(): int;
+extern fn fw_env(name: string, fallback: string): string;
+extern fn fw_parse(text: string): int;
+extern fn fw_kind(value: int): int;
+extern fn fw_get(value: int, key: string): int;
+extern fn fw_at(value: int, index: int): int;
+extern fn fw_count(value: int): int;
+extern fn fw_text(value: int): string;
+extern fn fw_integer(value: int): int;
+extern fn fw_boolean(value: int): int;
+extern fn fw_dump(value: int): string;
+extern fn fw_object(): int;
+extern fn fw_array(): int;
+extern fn fw_string(value: string): int;
+extern fn fw_number(value: int): int;
+extern fn fw_bool(value: int): int;
+extern fn fw_set(value: int, key: string, child: int): int;
+extern fn fw_push(value: int, child: int): int;
+extern fn fw_keys(value: int): int;
+extern fn fw_method(request: int): string;
+extern fn fw_path(request: int): string;
+extern fn fw_header(request: int, name: string): string;
+extern fn fw_query(request: int, name: string): string;
+extern fn fw_body(request: int): string;
+extern fn fw_ip(request: int): string;
+extern fn fw_segment(request: int, index: int): string;
+extern fn fw_segments(request: int): int;
+extern fn fw_respond(request: int, status: int, body: string): int;
+extern fn fw_redirect(request: int, url: string): int;
+extern fn fw_file(request: int, root: string, name: string): int;
+extern fn fw_upload(request: int, root: string): string;
+extern fn fw_cors(request: int, origins: string): int;
+extern fn fw_content_type(request: int, value: string): int;
+extern fn fw_trim(value: string): string;
+extern fn fw_chars(value: string): int;
+extern fn fw_valid(value: string, kind: string): int;
+extern fn fw_lower(value: string): string;
+extern fn fw_equal(a: string, b: string): int;
+extern fn fw_starts(value: string, prefix: string): int;
+extern fn fw_part(value: string, index: int): string;
+extern fn fw_uuid(): string;
+extern fn fw_now(): int;
+extern fn fw_rate(key: string, maximum: int, seconds: int): int;
+extern fn fw_urlencode(value: string): string;
+extern fn fw_fetch(url: string, method: string, body: string, bearer: string): int;
+extern fn fw_jwt_verify(token: string, secret: string): int;
+extern fn fw_jwt_sign(claims: int, secret: string): string;
+extern fn fw_read(path: string): string;
+
+fn scope_begin(): int { return fw_scope_begin(); }
+
+fn scope_end(): int { return fw_scope_end(); }
+
+fn env(name: string, fallback: string): string { return fw_env(name, fallback); }
+
+fn parse(text: string): int { return fw_parse(text); }
+
+fn kind(value: int): int { return fw_kind(value); }
+
+fn get(value: int, key: string): int { return fw_get(value, key); }
+
+fn at(value: int, index: int): int { return fw_at(value, index); }
+
+fn count(value: int): int { return fw_count(value); }
+
+fn text(value: int): string { return fw_text(value); }
+
+fn integer(value: int): int { return fw_integer(value); }
+
+fn boolean(value: int): int { return fw_boolean(value); }
+
+fn dump(value: int): string { return fw_dump(value); }
+
+fn object(): int { return fw_object(); }
+
+fn array(): int { return fw_array(); }
+
+fn jstring(value: string): int { return fw_string(value); }
+
+fn number(value: int): int { return fw_number(value); }
+
+fn jbool(value: int): int { return fw_bool(value); }
+
+fn set(value: int, key: string, child: int): int { return fw_set(value, key, child); }
+
+fn push(value: int, child: int): int { return fw_push(value, child); }
+
+fn keys(value: int): int { return fw_keys(value); }
+
+fn method(request: int): string { return fw_method(request); }
+
+fn path(request: int): string { return fw_path(request); }
+
+fn header(request: int, name: string): string { return fw_header(request, name); }
+
+fn query(request: int, name: string): string { return fw_query(request, name); }
+
+fn body(request: int): string { return fw_body(request); }
+
+fn ip(request: int): string { return fw_ip(request); }
+
+fn segment(request: int, index: int): string { return fw_segment(request, index); }
+
+fn segments(request: int): int { return fw_segments(request); }
+
+fn respond(request: int, status: int, body: string): int { return fw_respond(request, status, body); }
+
+fn redirect(request: int, url: string): int { return fw_redirect(request, url); }
+
+fn file(request: int, root: string, name: string): int { return fw_file(request, root, name); }
+
+fn upload(request: int, root: string): string { return fw_upload(request, root); }
+
+fn cors(request: int, origins: string): int { return fw_cors(request, origins); }
+
+fn content_type(request: int, value: string): int { return fw_content_type(request, value); }
+
+fn trim(value: string): string { return fw_trim(value); }
+
+fn chars(value: string): int { return fw_chars(value); }
+
+fn valid(value: string, kind: string): int { return fw_valid(value, kind); }
+
+fn lower(value: string): string { return fw_lower(value); }
+
+fn equal(a: string, b: string): int { return fw_equal(a, b); }
+
+fn starts(value: string, prefix: string): int { return fw_starts(value, prefix); }
+
+fn part(value: string, index: int): string { return fw_part(value, index); }
+
+fn uuid(): string { return fw_uuid(); }
+
+fn now(): int { return fw_now(); }
+
+fn rate(key: string, maximum: int, seconds: int): int { return fw_rate(key, maximum, seconds); }
+
+fn urlencode(value: string): string { return fw_urlencode(value); }
+
+fn fetch(url: string, method: string, body: string, bearer: string): int { return fw_fetch(url, method, body, bearer); }
+
+fn jwt_verify(token: string, secret: string): int { return fw_jwt_verify(token, secret); }
+
+fn jwt_sign(claims: int, secret: string): string { return fw_jwt_sign(claims, secret); }
+
+fn read(path: string): string { return fw_read(path); }
+
+fn field_text(value: int, key: string): string { return text(get(value, key)); }
+fn field_int(value: int, key: string): int { return integer(get(value, key)); }
+fn present(value: int, key: string): int { return kind(get(value, key)) != 0; }
+fn required(value: int, key: string, expected: int): int { return kind(get(value, key)) == expected; }
+fn optional(value: int, key: string, expected: int): int {
+    let actual: int = kind(get(value, key));
+    return actual == 0 || actual == expected;
+}
+fn string_array(value: int): int {
+    if (kind(value) != 5) { return 0; }
+    let index: int = 0;
+    while (index < count(value)) {
+        if (kind(at(value, index)) != 3) { return 0; }
+        index = index + 1;
+    }
+    return 1;
+}
+fn error(request: int, status: int, code: string): int {
+    let value: int = object();
+    set(value, "error", jstring(code));
+    return respond(request, status, dump(value));
+}
+fn validation(request: int, message: string): int {
+    let value: int = object();
+    set(value, "error", jstring("validation"));
+    set(value, "message", jstring(message));
+    return respond(request, 400, dump(value));
+}
+fn request_json(request: int): int {
+    let value: int = parse(body(request));
+    if (kind(value) != 4) { return 0; }
+    return value;
+}
+
+fn normalize_ip(value: string): string { return fw_normalize_ip(value); }
+fn sort(array: int, key: string): int { return fw_sort(array, key); }
+fn fetch_many(urls: int, bearer: string): int { return fw_fetch_many(urls, bearer); }
+
+fn has(value: int, key: string): int { return fw_has(value, key); }
+fn cookie(request: int, name: string): string { return fw_cookie(request, name); }
+fn set_cookie(request: int, name: string, value: string, age: int, secure: int): int { return fw_set_cookie(request, name, value, age, secure); }

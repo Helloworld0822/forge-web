@@ -1,0 +1,20 @@
+import web;
+import strings;
+native main {
+    web.scope_begin();
+    let value: int = web.parse("{\"title\":\"한글\",\"ids\":[\"a\",\"b\"],\"ok\":true}");
+    if (web.kind(value) != 4 || web.required(value, "title", 3) == 0 || web.string_array(web.get(value, "ids")) == 0) { return 1; }
+    if (web.chars(web.field_text(value, "title")) != 2 || web.boolean(web.get(value, "ok")) == 0) { return 2; }
+    if (web.integer(web.parse("8080")) != 8080 || web.kind(web.parse("{}garbage")) != 0) { return 3; }
+    let claims: int = web.object(); web.set(claims, "sub", web.jstring("reader")); web.set(claims, "role", web.jstring("user")); web.set(claims, "exp", web.number(web.now() + 60));
+    let jwt: string = web.jwt_sign(claims, "test-secret");
+    if (web.kind(web.jwt_verify(jwt, "test-secret")) != 4 || web.kind(web.jwt_verify(jwt, "wrong")) != 0) { return 4; }
+    if (web.valid("javascript:x", "url") != 0 || web.valid("https://example.test", "url") == 0 || web.valid("//evil.test", "return_path") != 0) { return 5; }
+    if (web.valid("127.0.0.1", "public_ip") != 0 || web.valid("::ffff:127.0.0.1", "public_ip") != 0 || web.valid("8.8.8.8", "public_ip") == 0) { return 6; }
+    let normalized: string = web.normalize_ip("2001:4860:4860:0:0:0:0:8888");
+    if (str_eq(normalized, "2001:4860:4860::8888") == 0) { return 7; }
+    if (web.valid("../secret", "filename") != 0 || web.valid("bad_login", "login") != 0) { return 8; }
+    if (web.rate("module-rate", 1, 60) == 0 || web.rate("module-rate", 1, 60) != 0) { return 9; }
+    web.scope_end();
+    println("Forge Web module tests passed"); return 0;
+}
