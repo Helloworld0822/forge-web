@@ -61,4 +61,5 @@ int64_t fw_has(int64_t value, const char *key);
 const char *fw_cookie(int64_t request, const char *name);
 int64_t fw_set_cookie(int64_t request, const char *name, const char *value,
                       int64_t age, int64_t secure);
+int64_t fw_request(const char *url, const char *method, const char *body, const char *bearer);
 #endif

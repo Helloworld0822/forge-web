@@ -196,3 +196,6 @@ fn fetch_many(urls: int, bearer: string): int { return fw_fetch_many(urls, beare
 fn has(value: int, key: string): int { return fw_has(value, key); }
 fn cookie(request: int, name: string): string { return fw_cookie(request, name); }
 fn set_cookie(request: int, name: string, value: string, age: int, secure: int): int { return fw_set_cookie(request, name, value, age, secure); }
+
+extern fn fw_request(url: string, method: string, body: string, bearer: string): int;
+fn request(url: string, method: string, body: string, bearer: string): int { return fw_request(url, method, body, bearer); }

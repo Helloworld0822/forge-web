@@ -421,8 +421,8 @@ static size_t receive_http(char *data, size_t size, size_t count, void *cls) {
   p[b->size] = 0;
   return n;
 }
-int64_t fw_fetch(const char *url, const char *method, const char *body,
-                 const char *bearer) {
+static int64_t fetch_response(const char *url, const char *method,
+                              const char *body, const char *bearer, int json) {
   CURL *c = curl_easy_init();
   if (!c)
     return 0;
@@ -453,20 +453,38 @@ int64_t fw_fetch(const char *url, const char *method, const char *body,
   curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, receive_http);
   curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
-  if (method && !strcmp(method, "POST")) {
+  if (json)
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+  curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
+  if (method && (!strcmp(method, "POST") || !strcmp(method, "PUT") ||
+                 !strcmp(method, "DELETE"))) {
+    curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
     curl_easy_setopt(c, CURLOPT_POST, 1L);
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, body ? body : "");
   }
   CURLcode rc = curl_easy_perform(c);
   long status = 0;
   curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
-  int64_t out = rc == CURLE_OK && status >= 200 && status < 300 && b.data
-                    ? fw_parse(b.data)
-                    : 0;
+  int64_t out = fw_object();
+  fw_set(out, "status", fw_number(rc == CURLE_OK ? status : 0));
+  fw_set(out, "data", b.data ? fw_parse(b.data) : 0);
   free(b.data);
   curl_slist_free_all(headers);
   curl_easy_cleanup(c);
   return out;
+}
+int64_t fw_fetch(const char *url, const char *method, const char *body,
+                 const char *bearer) {
+  int64_t response = fetch_response(url, method, body, bearer, 0);
+  int64_t status = fw_integer(fw_get(response, "status"));
+  return status >= 200 && status < 300 ? fw_get(response, "data") : 0;
+}
+int64_t fw_request(const char *url, const char *method, const char *body,
+                   const char *bearer) {
+  if (!method || (strcmp(method, "GET") && strcmp(method, "POST") &&
+                  strcmp(method, "PUT") && strcmp(method, "DELETE")))
+    return 0;
+  return fetch_response(url, method, body, bearer, 1);
 }
 static char *b64(const unsigned char *data, size_t n) {
   char *s = track(malloc(4 * ((n + 2) / 3) + 1), 0);
