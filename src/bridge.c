@@ -918,6 +918,8 @@ static enum MHD_Result serve(void *cls, struct MHD_Connection *connection,
   if (*size) {
     if (*size > BODY_MAX - r->size)
       r->error = 413;
+    if (!r->post && memchr(data, 0, *size))
+      r->error = 400;
     if (!r->error) {
       if (r->post) {
         if (MHD_post_process(r->post, data, *size) != MHD_YES && !r->error)

@@ -1,3 +1,4 @@
+import strings;
 extern fn fw_has(value: int, key: string): int;
 extern fn fw_cookie(request: int, name: string): string;
 extern fn fw_set_cookie(request: int, name: string, value: string, age: int, secure: int): int;
@@ -181,6 +182,8 @@ fn validation(request: int, message: string): int {
     return respond(request, 400, dump(value));
 }
 fn request_json(request: int): int {
+    let content_type: string = lower(header(request, "Content-Type"));
+    if (starts(content_type, "application/json") == 0 && str_contains(content_type, "+json") == 0) { return 0; }
     let value: int = parse(body(request));
     if (kind(value) != 4) { return 0; }
     return value;
