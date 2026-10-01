@@ -26,42 +26,138 @@
 #define JSON_MAX (2u * 1024u * 1024u)
 #define FILE_MAX (20u * 1024u * 1024u)
 #define FETCH_MAX (4u * 1024u * 1024u)
-typedef struct Owned {
+/* Cache at most sixteen small tracking blocks per worker (about 33 KiB).
+ * Larger scopes release excess blocks at scope end; thread teardown releases
+ * the cache and any resources left by an early return. */
+#define OWNED_BLOCK_SIZE 128u
+typedef struct {
   void *value;
   int json;
-  struct Owned *next;
 } Owned;
-static _Thread_local Owned *owned;
+typedef struct OwnedBlock {
+  struct OwnedBlock *previous;
+  size_t used;
+  Owned values[OWNED_BLOCK_SIZE];
+} OwnedBlock;
+typedef struct {
+  OwnedBlock first;
+  OwnedBlock *current, *available;
+  unsigned cached;
+  CURL *curl;
+} ThreadState;
+static _Thread_local ThreadState *thread_state;
+static pthread_key_t state_key;
+static pthread_once_t state_once = PTHREAD_ONCE_INIT;
+static int state_key_ok;
+static void clear_scope(ThreadState *s) {
+  OwnedBlock *b = s->current;
+  while (b) {
+    while (b->used) {
+      Owned *o = &b->values[--b->used];
+      if (o->json)
+        json_object_put(o->value);
+      else
+        free(o->value);
+    }
+    OwnedBlock *previous = b->previous;
+    if (b != &s->first) {
+      if (s->cached < 15) {
+        b->previous = s->available;
+        s->available = b;
+        s->cached++;
+      } else
+        free(b);
+    }
+    b = previous;
+  }
+  s->current = &s->first;
+}
+static void destroy_state(void *value) {
+  ThreadState *s = value;
+  if (!s)
+    return;
+  clear_scope(s);
+  while (s->available) {
+    OwnedBlock *b = s->available;
+    s->available = b->previous;
+    free(b);
+  }
+  if (s->curl)
+    curl_easy_cleanup(s->curl);
+  thread_state = NULL;
+  free(s);
+}
+static void make_state_key(void) {
+  state_key_ok = pthread_key_create(&state_key, destroy_state) == 0;
+}
+static ThreadState *get_state(void) {
+  if (thread_state)
+    return thread_state;
+  pthread_once(&state_once, make_state_key);
+  if (!state_key_ok)
+    return NULL;
+  ThreadState *s = calloc(1, sizeof(*s));
+  if (!s)
+    return NULL;
+  s->current = &s->first;
+  if (pthread_setspecific(state_key, s)) {
+    free(s);
+    return NULL;
+  }
+  thread_state = s;
+  return s;
+}
 static void *track(void *value, int json) {
   if (!value)
     return NULL;
-  Owned *o = malloc(sizeof(*o));
-  if (!o) {
+  ThreadState *s = get_state();
+  if (s && s->current->used == OWNED_BLOCK_SIZE) {
+    OwnedBlock *b = s->available;
+    if (b) {
+      s->available = b->previous;
+      s->cached--;
+    } else
+      b = calloc(1, sizeof(*b));
+    if (b) {
+      b->previous = s->current;
+      s->current = b;
+    } else
+      s = NULL;
+  }
+  if (!s) {
     if (json)
       json_object_put(value);
     else
       free(value);
     return NULL;
   }
-  o->value = value;
-  o->json = json;
-  o->next = owned;
-  owned = o;
+  s->current->values[s->current->used++] = (Owned){value, json};
   return value;
 }
 static const char *copy(const char *s) { return track(strdup(s ? s : ""), 0); }
 int64_t fw_scope_begin(void) { return fw_scope_end(); }
 int64_t fw_scope_end(void) {
-  while (owned) {
-    Owned *o = owned;
-    owned = o->next;
-    if (o->json)
-      json_object_put(o->value);
-    else
-      free(o->value);
-    free(o);
-  }
+  if (thread_state)
+    clear_scope(thread_state);
   return 1;
+}
+static pthread_once_t curl_once = PTHREAD_ONCE_INIT;
+static int curl_ready;
+static void init_curl(void) {
+  curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+}
+static CURL *get_curl(void) {
+  pthread_once(&curl_once, init_curl);
+  if (!curl_ready)
+    return NULL;
+  ThreadState *s = get_state();
+  if (!s)
+    return NULL;
+  if (!s->curl)
+    s->curl = curl_easy_init();
+  if (s->curl)
+    curl_easy_reset(s->curl);
+  return s->curl;
 }
 const char *fw_env(const char *name, const char *fallback) {
   const char *s = getenv(name);
@@ -351,37 +447,68 @@ const char *fw_uuid(void) {
   return copy(s);
 }
 int64_t fw_now(void) { return time(NULL); }
+#define RATE_CAPACITY 4096u
+#define RATE_BUCKETS 8192u
 typedef struct {
   char key[256];
   time_t start;
-  int count;
+  int64_t count;
+  unsigned next;
 } Rate;
-static Rate rates[4096];
+static Rate rates[RATE_CAPACITY];
+static unsigned rate_buckets[RATE_BUCKETS];
+static unsigned rate_used;
 static pthread_mutex_t rate_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned rate_bucket(const char *key) {
+  uint64_t hash = UINT64_C(14695981039346656037);
+  for (const unsigned char *p = (const unsigned char *)key; *p; p++)
+    hash = (hash ^ *p) * UINT64_C(1099511628211);
+  return (unsigned)(hash & (RATE_BUCKETS - 1));
+}
 int64_t fw_rate(const char *key, int64_t max, int64_t seconds) {
   if (!key || strlen(key) >= sizeof(rates[0].key) || max < 1 || seconds < 1)
     return 0;
   time_t now = time(NULL);
+  unsigned bucket = rate_bucket(key);
   pthread_mutex_lock(&rate_mutex);
-  int slot = -1;
-  time_t oldest = now;
-  for (int i = 0; i < 4096; i++) {
-    if (!strcmp(rates[i].key, key)) {
-      slot = i;
-      break;
+  unsigned link = rate_buckets[bucket];
+  while (link && strcmp(rates[link - 1].key, key))
+    link = rates[link - 1].next;
+  unsigned slot;
+  if (link)
+    slot = link - 1;
+  else {
+    if (rate_used < RATE_CAPACITY)
+      slot = rate_used++;
+    else {
+      /* Preserve bounded storage and the previous oldest-entry eviction rule:
+       * entries started in this same second cannot be evicted. */
+      slot = RATE_CAPACITY;
+      time_t oldest = now;
+      for (unsigned i = 0; i < RATE_CAPACITY; i++) {
+        if (rates[i].start < oldest) {
+          oldest = rates[i].start;
+          slot = i;
+        }
+      }
+      if (slot == RATE_CAPACITY) {
+        pthread_mutex_unlock(&rate_mutex);
+        return 0;
+      }
+      unsigned *previous = &rate_buckets[rate_bucket(rates[slot].key)];
+      while (*previous != slot + 1)
+        previous = &rates[*previous - 1].next;
+      *previous = rates[slot].next;
     }
-    if (!rates[i].key[0] || rates[i].start < oldest) {
-      oldest = rates[i].start;
-      slot = i;
-    }
-  }
-  if (slot < 0) {
-    pthread_mutex_unlock(&rate_mutex);
-    return 0;
+    Rate *r = &rates[slot];
+    snprintf(r->key, sizeof(r->key), "%s", key);
+    r->start = now;
+    r->count = 0;
+    r->next = rate_buckets[bucket];
+    rate_buckets[bucket] = slot + 1;
   }
   Rate *r = &rates[slot];
-  if (strcmp(r->key, key) || now - r->start >= seconds) {
-    snprintf(r->key, sizeof(r->key), "%s", key);
+  if (now - r->start >= seconds) {
     r->start = now;
     r->count = 0;
   }
@@ -392,18 +519,42 @@ int64_t fw_rate(const char *key, int64_t max, int64_t seconds) {
   return ok;
 }
 const char *fw_urlencode(const char *s) {
-  CURL *c = curl_easy_init();
-  if (!c)
+  pthread_once(&curl_once, init_curl);
+  if (!curl_ready)
     return "";
-  char *e = curl_easy_escape(c, s ? s : "", 0);
+  char *e = curl_easy_escape(NULL, s ? s : "", 0);
   const char *out = copy(e);
   curl_free(e);
-  curl_easy_cleanup(c);
   return out ? out : "";
+}
+/* Capacity includes the terminating NUL. Each growth is geometric and capped
+ * at the externally visible payload limit plus one. */
+static int reserve_buffer(char **data, size_t *capacity, size_t needed,
+                          size_t limit) {
+  if (needed > limit + 1)
+    return 0;
+  if (needed <= *capacity)
+    return 1;
+  size_t next = *capacity ? *capacity : 4096;
+  if (next > limit + 1)
+    next = limit + 1;
+  while (next < needed) {
+    if (next > (limit + 1) / 2) {
+      next = limit + 1;
+      break;
+    }
+    next *= 2;
+  }
+  char *p = realloc(*data, next);
+  if (!p)
+    return 0;
+  *data = p;
+  *capacity = next;
+  return 1;
 }
 typedef struct {
   char *data;
-  size_t size;
+  size_t size, capacity;
 } Buffer;
 static size_t receive_http(char *data, size_t size, size_t count, void *cls) {
   Buffer *b = cls;
@@ -412,10 +563,9 @@ static size_t receive_http(char *data, size_t size, size_t count, void *cls) {
   size_t n = size * count;
   if (n > FETCH_MAX - b->size)
     return 0;
-  char *p = realloc(b->data, b->size + n + 1);
-  if (!p)
+  if (!reserve_buffer(&b->data, &b->capacity, b->size + n + 1, FETCH_MAX))
     return 0;
-  b->data = p;
+  char *p = b->data;
   memcpy(p + b->size, data, n);
   b->size += n;
   p[b->size] = 0;
@@ -423,7 +573,7 @@ static size_t receive_http(char *data, size_t size, size_t count, void *cls) {
 }
 static int64_t fetch_response(const char *url, const char *method,
                               const char *body, const char *bearer, int json) {
-  CURL *c = curl_easy_init();
+  CURL *c = get_curl();
   if (!c)
     return 0;
   Buffer b = {0};
@@ -434,7 +584,7 @@ static int64_t fetch_response(const char *url, const char *method,
     char *h = malloc(n);
     if (!h) {
       curl_slist_free_all(headers);
-      curl_easy_cleanup(c);
+      curl_easy_reset(c);
       return 0;
     }
     snprintf(h, n, "Authorization: Bearer %s", bearer);
@@ -476,7 +626,7 @@ static int64_t fetch_response(const char *url, const char *method,
   fw_set(out, "data", b.data ? fw_parse(b.data) : 0);
   free(b.data);
   curl_slist_free_all(headers);
-  curl_easy_cleanup(c);
+  curl_easy_reset(c);
   return out;
 }
 int64_t fw_fetch(const char *url, const char *method, const char *body,
@@ -625,7 +775,7 @@ const char *fw_read(const char *path) {
 typedef struct {
   struct MHD_Connection *connection;
   char *method, *path, *body;
-  size_t size;
+  size_t size, capacity;
   struct MHD_Response *response;
   unsigned status;
   char *origin;
@@ -951,11 +1101,11 @@ static enum MHD_Result serve(void *cls, struct MHD_Connection *connection,
       } else if (*size > JSON_MAX - r->size)
         r->error = 413;
       else {
-        char *buf = realloc(r->body, r->size + *size + 1);
-        if (!buf)
+        if (!reserve_buffer(&r->body, &r->capacity, r->size + *size + 1,
+                            JSON_MAX))
           r->error = 500;
         else {
-          r->body = buf;
+          char *buf = r->body;
           memcpy(buf + r->size, data, *size);
           buf[r->size + *size] = 0;
         }
@@ -1009,7 +1159,8 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
   addr.sin_port = htons((uint16_t)port);
   if (inet_pton(AF_INET, host, &addr.sin_addr) != 1)
     return 1;
-  if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
+  pthread_once(&curl_once, init_curl);
+  if (!curl_ready)
     return 1;
   app_handler = handler;
   stopping = 0;
@@ -1024,7 +1175,6 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
       MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
       MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
   if (!d) {
-    curl_global_cleanup();
     return 1;
   }
   fprintf(stderr, "Forge portfolio API listening on %s:%lld\n", host,
@@ -1034,7 +1184,6 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
     nanosleep(&delay, NULL);
   }
   MHD_stop_daemon(d);
-  curl_global_cleanup();
   return 0;
 }
 

@@ -1,8 +1,8 @@
 {
   "name": "forge-web",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "HTTP server, JSON, OAuth building blocks and signed JWTs for Forge.",
-  "repository_url": "https://github.com/Helloworld0822/forge-web",
+  "repository_url": "https://github.com/forge-language/forge-web",
   "module": "web.fg",
   "license": "MIT",
   "dependencies": {},

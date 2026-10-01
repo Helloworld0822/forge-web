@@ -1,0 +1,151 @@
+{
+  "baseline": "8ef1ce0 (forge-web 0.1.1)",
+  "conditions": {
+    "image": "forge-platform-release:local",
+    "compiler": "GCC 11.4 -O2",
+    "cpu_quota": 2,
+    "host": "shared AMD BC-250",
+    "rounds": 5,
+    "order": "alternating",
+    "limits": "synthetic native microbenchmarks and sequential loopback HTTP; not application RPS"
+  },
+  "samples": {
+    "before": [
+      {
+        "buffer_seconds": 0.080169145,
+        "ownership_seconds": 0.033768361,
+        "rate_seconds": 2.514019738,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.170223221,
+        "http_requests": 300,
+        "http_connections": 300
+      },
+      {
+        "buffer_seconds": 0.079030579,
+        "ownership_seconds": 0.03319959,
+        "rate_seconds": 2.453673759,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.155423553,
+        "http_requests": 300,
+        "http_connections": 300
+      },
+      {
+        "buffer_seconds": 0.067545017,
+        "ownership_seconds": 0.033808825,
+        "rate_seconds": 2.488354867,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.14275045,
+        "http_requests": 300,
+        "http_connections": 300
+      },
+      {
+        "buffer_seconds": 0.068294783,
+        "ownership_seconds": 0.033822555,
+        "rate_seconds": 2.509974677,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.199930293,
+        "http_requests": 300,
+        "http_connections": 300
+      },
+      {
+        "buffer_seconds": 0.0797393,
+        "ownership_seconds": 0.033834463,
+        "rate_seconds": 2.567553476,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.265707197,
+        "http_requests": 300,
+        "http_connections": 300
+      }
+    ],
+    "after": [
+      {
+        "buffer_seconds": 0.060703577,
+        "ownership_seconds": 0.023321784,
+        "rate_seconds": 0.007485508,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.064005466,
+        "http_requests": 300,
+        "http_connections": 1
+      },
+      {
+        "buffer_seconds": 0.060745298,
+        "ownership_seconds": 0.023452385,
+        "rate_seconds": 0.007590471,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.108751042,
+        "http_requests": 300,
+        "http_connections": 1
+      },
+      {
+        "buffer_seconds": 0.050172252,
+        "ownership_seconds": 0.024296394,
+        "rate_seconds": 0.012341019,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.092215487,
+        "http_requests": 300,
+        "http_connections": 1
+      },
+      {
+        "buffer_seconds": 0.03892997,
+        "ownership_seconds": 0.024139878,
+        "rate_seconds": 0.012882211,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.109301027,
+        "http_requests": 300,
+        "http_connections": 1
+      },
+      {
+        "buffer_seconds": 0.032058981,
+        "ownership_seconds": 0.023454798,
+        "rate_seconds": 0.007498336,
+        "buffer_bytes": 167772160,
+        "owned_values": 1000000,
+        "rate_checks": 200000,
+        "http_seconds": 0.118731404,
+        "http_requests": 300,
+        "http_connections": 1
+      }
+    ]
+  },
+  "median": {
+    "before": {
+      "buffer_seconds": 0.079030579,
+      "ownership_seconds": 0.033808825,
+      "rate_seconds": 2.509974677,
+      "http_seconds": 0.170223221,
+      "http_connections": 300
+    },
+    "after": {
+      "buffer_seconds": 0.050172252,
+      "ownership_seconds": 0.023454798,
+      "rate_seconds": 0.007590471,
+      "http_seconds": 0.108751042,
+      "http_connections": 1
+    }
+  },
+  "speedup": {
+    "buffer_seconds": 1.5751850046515752,
+    "ownership_seconds": 1.4414460103216409,
+    "rate_seconds": 330.6744307434941,
+    "http_seconds": 1.5652560000298663,
+    "http_connections": 300.0
+  }
+}
