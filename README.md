@@ -32,3 +32,9 @@ Rate counters are bounded to 4096 keys and reset on process restart.
 HttpOnly/SameSite and Secure attributes. TLS should terminate at nginx or another
 reverse proxy. Keep synchronous database/outbound work within configured worker
 and connection bounds. This library does not implement an async reactor.
+
+The HTTP server uses libmicrohttpd epoll polling when supported and falls back
+to poll or select. Set `FORGE_WEB_POLL` to `auto`, `epoll`, `poll` or `select` to
+choose a mode; startup falls back if the selected mode cannot initialize.
+Method, path, parsed route segments and resolved client IP are stored in the
+request object and reused during its callback lifetime.

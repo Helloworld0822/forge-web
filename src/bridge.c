@@ -783,7 +783,34 @@ typedef struct {
   int error, fd, files, finalized;
   size_t file_size;
   char temp[512], extension[8];
+  char ip[INET6_ADDRSTRLEN];
+  int ip_ready, parts_ready;
+  int64_t path_count;
+  char *part_storage;
+  const char *parts[8];
+  char storage[];
 } Request;
+/* Own method, path and a lazy segment scratch buffer in the same allocation
+ * as the request. None of these pointers borrow MHD callback storage. */
+static Request *new_request(struct MHD_Connection *connection, const char *path,
+                            const char *method) {
+  size_t path_size = strlen(path) + 1, method_size = strlen(method) + 1;
+  if (method_size > SIZE_MAX - sizeof(Request) ||
+      path_size > (SIZE_MAX - sizeof(Request) - method_size) / 2)
+    return NULL;
+  Request *r = calloc(1, sizeof(*r) + method_size + 2 * path_size);
+  if (!r)
+    return NULL;
+  r->fd = -1;
+  r->connection = connection;
+  r->method = r->storage;
+  r->path = r->method + method_size;
+  r->part_storage = r->path + path_size;
+  r->path_count = -1;
+  memcpy(r->method, method, method_size);
+  memcpy(r->path, path, path_size);
+  return r;
+}
 static fw_handler app_handler;
 static volatile sig_atomic_t stopping;
 const char *fw_method(int64_t h) { return h ? P(Request, h)->method : ""; }
@@ -806,43 +833,73 @@ const char *fw_body(int64_t h) {
 const char *fw_ip(int64_t h) {
   if (!h)
     return "";
+  Request *r = P(Request, h);
+  if (r->ip_ready)
+    return r->ip;
+  r->ip_ready = 1;
   const union MHD_ConnectionInfo *info = MHD_get_connection_info(
-      P(Request, h)->connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+      r->connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
   if (!info || !info->client_addr)
-    return "";
-  char ip[INET6_ADDRSTRLEN];
+    return r->ip;
   struct sockaddr *addr = info->client_addr;
   if (addr->sa_family == AF_INET)
-    inet_ntop(AF_INET, &((struct sockaddr_in *)addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)addr)->sin_addr, r->ip,
+              sizeof(r->ip));
   else if (addr->sa_family == AF_INET6)
-    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)addr)->sin6_addr, ip,
-              sizeof(ip));
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)addr)->sin6_addr, r->ip,
+              sizeof(r->ip));
   else
-    return "";
+    return r->ip;
   const char *proxy = fw_header(h, "X-Real-IP");
-  if (private_ip(ip) && fw_valid(proxy, "ip")) {
+  if (private_ip(r->ip) && fw_valid(proxy, "ip")) {
     struct in_addr a;
     struct in6_addr b;
     if (inet_pton(AF_INET, proxy, &a) == 1)
-      inet_ntop(AF_INET, &a, ip, sizeof(ip));
+      inet_ntop(AF_INET, &a, r->ip, sizeof(r->ip));
     else {
       inet_pton(AF_INET6, proxy, &b);
-      inet_ntop(AF_INET6, &b, ip, sizeof(ip));
+      inet_ntop(AF_INET6, &b, r->ip, sizeof(r->ip));
     }
   }
-  return copy(ip);
+  return r->ip;
 }
-const char *fw_segment(int64_t h, int64_t i) { return fw_part(fw_path(h), i); }
+const char *fw_segment(int64_t h, int64_t i) {
+  if (!h || i < 0)
+    return "";
+  Request *r = P(Request, h);
+  if ((uint64_t)i >= sizeof(r->parts) / sizeof(r->parts[0]))
+    return fw_part(r->path, i);
+  if (!r->parts_ready) {
+    memcpy(r->part_storage, r->path, strlen(r->path) + 1);
+    char *part = r->part_storage;
+    while (*part == '/')
+      part++;
+    for (size_t j = 0; j < sizeof(r->parts) / sizeof(r->parts[0]); j++) {
+      r->parts[j] = part;
+      char *slash = strchr(part, '/');
+      if (!slash)
+        break;
+      *slash = 0;
+      part = slash + 1;
+    }
+    r->parts_ready = 1;
+  }
+  return r->parts[i] ? r->parts[i] : "";
+}
 int64_t fw_segments(int64_t h) {
-  const char *s = fw_path(h);
+  if (!h)
+    return 0;
+  Request *r = P(Request, h);
+  if (r->path_count >= 0)
+    return r->path_count;
+  const char *s = r->path;
   if (*s == '/')
     s++;
-  if (!*s)
-    return 0;
-  int n = 1;
+  int64_t n = *s ? 1 : 0;
   while (*s)
     if (*s++ == '/')
       n++;
+  r->path_count = n;
   return n;
 }
 static int64_t response(Request *r, unsigned status, const char *body,
@@ -1055,8 +1112,6 @@ static void completed(void *cls, struct MHD_Connection *connection,
     unlink(r->temp);
   if (r->response)
     MHD_destroy_response(r->response);
-  free(r->method);
-  free(r->path);
   free(r->body);
   free(r->origin);
   free(r);
@@ -1070,16 +1125,10 @@ static enum MHD_Result serve(void *cls, struct MHD_Connection *connection,
   (void)version;
   Request *r = *context;
   if (!r) {
-    r = calloc(1, sizeof(*r));
+    r = new_request(connection, path, method);
     if (!r)
       return MHD_NO;
-    r->fd = -1;
-    r->connection = connection;
-    r->method = strdup(method);
-    r->path = strdup(path);
     *context = r;
-    if (!r->method || !r->path)
-      return MHD_NO;
     const char *type = MHD_lookup_connection_value(connection, MHD_HEADER_KIND,
                                                    "Content-Type");
     if (type && !strncasecmp(type, "multipart/form-data", 19)) {
@@ -1149,6 +1198,33 @@ static void stop_server(int sig) {
   (void)sig;
   stopping = 1;
 }
+/* Runtime feature checks keep the same binary usable when the MHD build or
+ * platform lacks epoll. An explicit mode permits comparable deployment tests.
+ */
+static unsigned polling_flags(const char *mode, int epoll, int poll) {
+  unsigned base = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG;
+  if (!mode || !*mode || !strcmp(mode, "auto")) {
+    if (epoll)
+      return base | MHD_USE_EPOLL;
+    if (poll)
+      return base | MHD_USE_POLL;
+    return base;
+  }
+  if (!strcmp(mode, "epoll"))
+    return base | (epoll ? MHD_USE_EPOLL : poll ? MHD_USE_POLL : 0);
+  if (!strcmp(mode, "poll"))
+    return base | (poll ? MHD_USE_POLL : 0);
+  return !strcmp(mode, "select") ? base : 0;
+}
+static struct MHD_Daemon *start_daemon(unsigned flags, struct sockaddr_in *addr,
+                                       unsigned workers) {
+  return MHD_start_daemon(
+      flags, ntohs(addr->sin_port), NULL, NULL, serve, NULL,
+      MHD_OPTION_SOCK_ADDR, addr, MHD_OPTION_THREAD_POOL_SIZE, workers,
+      MHD_OPTION_CONNECTION_LIMIT, 256u, MHD_OPTION_CONNECTION_TIMEOUT, 30u,
+      MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
+      MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
+}
 int64_t fw_run(const char *host, int64_t port, int64_t workers,
                fw_handler handler) {
   if (!host || !handler || port < 1 || port > 65535 || workers < 1 ||
@@ -1167,18 +1243,28 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
   signal(SIGTERM, stop_server);
   signal(SIGINT, stop_server);
   signal(SIGPIPE, SIG_IGN);
-  struct MHD_Daemon *d = MHD_start_daemon(
-      MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG, (uint16_t)port, NULL,
-      NULL, serve, NULL, MHD_OPTION_SOCK_ADDR, &addr,
-      MHD_OPTION_THREAD_POOL_SIZE, (unsigned int)workers,
-      MHD_OPTION_CONNECTION_LIMIT, 256u, MHD_OPTION_CONNECTION_TIMEOUT, 30u,
-      MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
-      MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
+  unsigned flags =
+      polling_flags(fw_env("FORGE_WEB_POLL", "auto"),
+                    MHD_is_feature_supported(MHD_FEATURE_EPOLL) == MHD_YES,
+                    MHD_is_feature_supported(MHD_FEATURE_POLL) == MHD_YES);
+  if (!flags) {
+    fprintf(stderr,
+            "Invalid FORGE_WEB_POLL: use auto, epoll, poll or select\n");
+    return 1;
+  }
+  struct MHD_Daemon *d = start_daemon(flags, &addr, (unsigned)workers);
+  if (!d && (flags & (MHD_USE_EPOLL | MHD_USE_POLL))) {
+    flags = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG;
+    d = start_daemon(flags, &addr, (unsigned)workers);
+  }
   if (!d) {
     return 1;
   }
-  fprintf(stderr, "Forge portfolio API listening on %s:%lld\n", host,
-          (long long)port);
+  fprintf(stderr, "Forge portfolio API listening on %s:%lld (polling=%s)\n",
+          host, (long long)port,
+          flags & MHD_USE_EPOLL  ? "epoll"
+          : flags & MHD_USE_POLL ? "poll"
+                                 : "select");
   while (!stopping) {
     struct timespec delay = {0, 100000000};
     nanosleep(&delay, NULL);

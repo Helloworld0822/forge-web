@@ -1,11 +1,21 @@
 #include "forge_web.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 static int64_t handler(int64_t request) {
-  char result[80];
-  snprintf(result, sizeof(result), "{\"bytes\":%zu}", strlen(fw_body(request)));
-  return fw_respond(request, 200, result);
+  const char *ip = fw_ip(request);
+  assert(ip == fw_ip(request));
+  int64_t result = fw_object();
+  fw_set(result, "bytes", fw_number((int64_t)strlen(fw_body(request))));
+  fw_set(result, "ip", fw_string(ip));
+  fw_set(result, "path", fw_string(fw_path(request)));
+  fw_set(result, "count", fw_number(fw_segments(request)));
+  int64_t parts = fw_array();
+  for (int64_t i = 0; i < fw_segments(request) && i < 10; i++)
+    fw_push(parts, fw_string(fw_segment(request, i)));
+  fw_set(result, "parts", parts);
+  return fw_respond(request, 200, fw_dump(result));
 }
 int main(int argc, char **argv) {
   return argc == 2 ? (int)fw_run("127.0.0.1", atoi(argv[1]), 2, handler) : 1;
