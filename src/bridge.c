@@ -1513,7 +1513,14 @@ static unsigned polling_flags(const char *mode, int epoll, int poll) {
   return !strcmp(mode, "select") ? base : 0;
 }
 static struct MHD_Daemon *start_daemon(unsigned flags, struct sockaddr_in *addr,
-                                       unsigned workers) {
+                                       unsigned workers, int connection_threads) {
+  if (connection_threads)
+    return MHD_start_daemon(
+        flags, ntohs(addr->sin_port), NULL, NULL, serve, NULL,
+        MHD_OPTION_SOCK_ADDR, addr, MHD_OPTION_CONNECTION_LIMIT, 256u,
+        MHD_OPTION_CONNECTION_TIMEOUT, 30u,
+        MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
+        MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
   return MHD_start_daemon(
       flags, ntohs(addr->sin_port), NULL, NULL, serve, NULL,
       MHD_OPTION_SOCK_ADDR, addr, MHD_OPTION_THREAD_POOL_SIZE, workers,
@@ -1539,6 +1546,12 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
   pthread_once(&curl_once, init_curl);
   if (!curl_ready)
     return 1;
+  const char *threads = fw_env("FORGE_WEB_THREADS", "connection");
+  int connection_threads = !strcmp(threads, "connection");
+  if (!connection_threads && strcmp(threads, "pool")) {
+    fprintf(stderr, "Invalid FORGE_WEB_THREADS: use connection or pool\n");
+    return 1;
+  }
   app_handler = handler;
   stopping = 0;
   signal(SIGTERM, stop_server);
@@ -1553,16 +1566,27 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
             "Invalid FORGE_WEB_POLL: use auto, epoll, poll or select\n");
     return 1;
   }
-  struct MHD_Daemon *d = start_daemon(flags, &addr, (unsigned)workers);
+  /* A synchronous handler must not block other connections sharing its poller.
+   * MHD's connection threads support poll/select, but not epoll or a pool. */
+  if (connection_threads) {
+    if (flags & MHD_USE_EPOLL) {
+      flags &= ~MHD_USE_EPOLL;
+      if (MHD_is_feature_supported(MHD_FEATURE_POLL) == MHD_YES)
+        flags |= MHD_USE_POLL;
+    }
+    flags |= MHD_USE_THREAD_PER_CONNECTION | MHD_USE_ITC;
+  }
+  struct MHD_Daemon *d = start_daemon(flags, &addr, (unsigned)workers, connection_threads);
   if (!d && (flags & (MHD_USE_EPOLL | MHD_USE_POLL))) {
-    flags = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG;
-    d = start_daemon(flags, &addr, (unsigned)workers);
+    flags = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG |
+            (connection_threads ? MHD_USE_THREAD_PER_CONNECTION | MHD_USE_ITC : 0);
+    d = start_daemon(flags, &addr, (unsigned)workers, connection_threads);
   }
   if (!d) {
     return 1;
   }
-  fprintf(stderr, "Forge portfolio API listening on %s:%lld (polling=%s)\n",
-          host, (long long)port,
+  fprintf(stderr, "Forge portfolio API listening on %s:%lld (threads=%s, polling=%s)\n",
+          host, (long long)port, threads,
           flags & MHD_USE_EPOLL  ? "epoll"
           : flags & MHD_USE_POLL ? "poll"
                                  : "select");

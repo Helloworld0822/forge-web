@@ -34,9 +34,21 @@ HttpOnly/SameSite and Secure attributes. TLS should terminate at nginx or anothe
 reverse proxy. Keep synchronous database/outbound work within configured worker
 and connection bounds. This library does not implement an async reactor.
 
-The HTTP server uses libmicrohttpd epoll polling when supported and falls back
-to poll or select. Set `FORGE_WEB_POLL` to `auto`, `epoll`, `poll` or `select` to
-choose a mode; startup falls back if the selected mode cannot initialize.
+The HTTP server defaults to `FORGE_WEB_THREADS=connection`, with a separate
+thread per accepted connection for synchronous handlers. Up to 256 connections
+are accepted with a 30-second inactivity timeout. Thread-local request tracking,
+optional curl state and application arenas remain attached to idle keepalive
+threads; the connection limit does not bound metadata-fetch helper threads.
+`FORGE_WEB_THREADS=pool` selects the original shared poller pool, where the
+`workers` argument controls its size and blocking handlers can delay other
+connections assigned to the same poller. In connection mode `workers` does not
+limit simultaneous handlers.
+
+Set `FORGE_WEB_POLL` to `auto`, `epoll`, `poll` or `select`. Connection threads
+support poll/select; epoll requests fall back to poll/select. Pool mode prefers
+epoll when available. Startup logs show the selected threading and polling
+modes. Inter-thread signalling ensures closed connection threads are reclaimed
+even when no new connection arrives.
 Method, path, parsed route segments and resolved client IP are stored in the
 request object and reused during its callback lifetime.
 
