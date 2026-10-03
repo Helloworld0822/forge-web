@@ -34,6 +34,15 @@ int main(int argc, char **argv) {
   assert(!strcmp(fw_text(fw_get(fw_get(r, "data"), "authorization")), ""));
   r = fw_request("file:///etc/passwd", "GET", "", "");
   assert(fw_integer(fw_get(r, "status")) == 0);
+  snprintf(url, sizeof(url), "%s/nul-json", argv[1]);
+  r = fw_request(url, "GET", "", "");
+  assert(fw_integer(fw_get(r, "status")) == 200 && !fw_get(r, "data"));
+  snprintf(url, sizeof(url), "%s/duplicate-json", argv[1]);
+  r = fw_request(url, "GET", "", "");
+  assert(fw_integer(fw_get(r, "status")) == 200 && !fw_get(r, "data"));
+  snprintf(url, sizeof(url), "%s/echo", argv[1]);
+  assert(!fw_request(url, "GET", "", "token\r\nInjected: value"));
+  assert(!fw_request(url, "GET", "", "token with spaces"));
   fw_scope_end();
   return 0;
 }

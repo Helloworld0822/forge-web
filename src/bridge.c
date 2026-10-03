@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
+#include <limits.h>
+#include <math.h>
 #include <microhttpd.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -163,20 +165,175 @@ const char *fw_env(const char *name, const char *fallback) {
   const char *s = getenv(name);
   return s ? s : fallback;
 }
+/* json-c intentionally replaces duplicate object members and accepts strings
+ * containing an escaped NUL. Forge string/FFI APIs are NUL-terminated, so those
+ * representations cannot safely reach application authorization/SQL policy.
+ * Run this bounded lexical pass only after the strict parser validated syntax.
+ * Object-local key sets compare decoded names, including escaped equivalents.
+ */
+static int json_unambiguous(const char *text, size_t size) {
+  struct {
+    struct json_object *keys;
+    int key_next;
+  } frames[32] = {0};
+  unsigned depth = 0;
+  const char *p = text, *end = text + size;
+  struct json_tokener *key_tok = NULL;
+  int ok = 1;
+  while (ok && p < end) {
+    if (*p == '{' || *p == '[') {
+      if (depth == sizeof(frames) / sizeof(frames[0])) {
+        ok = 0;
+        break;
+      }
+      frames[depth].keys = *p == '{' ? json_object_new_object() : NULL;
+      frames[depth].key_next = *p == '{';
+      if (*p == '{' && !frames[depth].keys) {
+        ok = 0;
+        break;
+      }
+      depth++;
+      p++;
+    } else if (*p == '}' || *p == ']') {
+      if (!depth) {
+        ok = 0;
+        break;
+      }
+      if (frames[--depth].keys)
+        json_object_put(frames[depth].keys);
+      frames[depth].keys = NULL;
+      p++;
+    } else if (*p == ',') {
+      if (depth && frames[depth - 1].keys)
+        frames[depth - 1].key_next = 1;
+      p++;
+    } else if (*p == '"') {
+      const char *begin = p++;
+      int escaped = 0;
+      while (p < end && *p != '"') {
+        unsigned char byte = (unsigned char)*p++;
+        if (byte < 0x20) {
+          ok = 0;
+          break;
+        }
+        if (byte == '\\') {
+          escaped = 1;
+          if (p == end) {
+            ok = 0;
+            break;
+          }
+          if (*p == 'u') {
+            if (end - p < 5 || !memcmp(p + 1, "0000", 4)) {
+              ok = 0;
+              break;
+            }
+            p += 5;
+          } else
+            p++;
+        }
+      }
+      if (!ok || p == end) {
+        ok = 0;
+        break;
+      }
+      p++;
+      if (depth && frames[depth - 1].keys && frames[depth - 1].key_next) {
+        char short_key[256], *allocated = NULL;
+        struct json_object *decoded = NULL;
+        const char *key = short_key;
+        if (escaped) {
+          if (!key_tok)
+            key_tok = json_tokener_new_ex(2);
+          if (!key_tok) {
+            ok = 0;
+            break;
+          }
+          json_tokener_reset(key_tok);
+          decoded = json_tokener_parse_ex(key_tok, begin, (int)(p - begin));
+          if (!decoded ||
+              json_tokener_get_error(key_tok) != json_tokener_success) {
+            if (decoded)
+              json_object_put(decoded);
+            ok = 0;
+            break;
+          }
+          key = json_object_get_string(decoded);
+        } else {
+          size_t length = (size_t)(p - begin) - 2;
+          if (length < sizeof(short_key)) {
+            memcpy(short_key, begin + 1, length);
+            short_key[length] = 0;
+          } else {
+            allocated = strndup(begin + 1, length);
+            key = allocated;
+          }
+        }
+        struct json_object *unused;
+        if (!key ||
+            json_object_object_get_ex(frames[depth - 1].keys, key, &unused) ||
+            json_object_object_add(frames[depth - 1].keys, key, NULL))
+          ok = 0;
+        free(allocated);
+        if (decoded)
+          json_object_put(decoded);
+        frames[depth - 1].key_next = 0;
+      }
+    } else if (*p == '-' || isdigit((unsigned char)*p)) {
+      const char *begin = p;
+      int floating = 0;
+      while (p < end && (*p == '-' || *p == '+' || *p == '.' || *p == 'e' ||
+                         *p == 'E' || isdigit((unsigned char)*p))) {
+        if (*p == '.' || *p == 'e' || *p == 'E')
+          floating = 1;
+        p++;
+      }
+      errno = 0;
+      char *number_end;
+      if (floating) {
+        double value = strtod(begin, &number_end);
+        if (!isfinite(value))
+          ok = 0;
+      } else {
+        (void)strtoll(begin, &number_end, 10);
+        if (errno == ERANGE)
+          ok = 0;
+      }
+      if (number_end != p)
+        ok = 0;
+    } else if (end - p >= 4 && (!memcmp(p, "null", 4) || !memcmp(p, "true", 4)))
+      p += 4;
+    else if (end - p >= 5 && !memcmp(p, "false", 5))
+      p += 5;
+    else if (*p == ':' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+      p++;
+    else
+      ok = 0;
+  }
+  while (depth)
+    if (frames[--depth].keys)
+      json_object_put(frames[depth].keys);
+  if (key_tok)
+    json_tokener_free(key_tok);
+  return ok;
+}
 int64_t fw_parse(const char *text) {
-  if (!text || strlen(text) > FETCH_MAX)
+  if (!text)
+    return 0;
+  size_t n = strnlen(text, FETCH_MAX + 1);
+  if (n > FETCH_MAX)
     return 0;
   struct json_tokener *tok = json_tokener_new_ex(32);
   if (!tok)
     return 0;
   json_tokener_set_flags(tok, JSON_TOKENER_STRICT | JSON_TOKENER_VALIDATE_UTF8);
-  size_t n = strlen(text);
   struct json_object *v = json_tokener_parse_ex(tok, text, (int)n + 1);
   size_t end = json_tokener_get_parse_end(tok);
   while (end < n && isspace((unsigned char)text[end]))
     end++;
   int ok = json_tokener_get_error(tok) == json_tokener_success && end == n;
   json_tokener_free(tok);
+  if (ok)
+    ok = json_unambiguous(text, n);
   if (!ok) {
     if (v)
       json_object_put(v);
@@ -571,26 +728,47 @@ static size_t receive_http(char *data, size_t size, size_t count, void *cls) {
   p[b->size] = 0;
   return n;
 }
+static int append_header(struct curl_slist **headers, const char *value) {
+  struct curl_slist *next = curl_slist_append(*headers, value);
+  if (!next)
+    return 0;
+  *headers = next;
+  return 1;
+}
 static int64_t fetch_response(const char *url, const char *method,
                               const char *body, const char *bearer, int json) {
+  if (!url || strnlen(url, 8193) > 8192)
+    return 0;
+  size_t bearer_size = bearer ? strnlen(bearer, 16385) : 0;
+  if (bearer_size > 16384)
+    return 0;
+  for (size_t i = 0; i < bearer_size; i++)
+    if ((unsigned char)bearer[i] <= 32 || (unsigned char)bearer[i] >= 127)
+      return 0;
   CURL *c = get_curl();
   if (!c)
     return 0;
   Buffer b = {0};
   struct curl_slist *headers = NULL;
-  headers = curl_slist_append(headers, "Accept: application/json");
-  if (bearer && *bearer) {
-    size_t n = strlen(bearer) + 24;
-    char *h = malloc(n);
+  if (!append_header(&headers, "Accept: application/json"))
+    return 0;
+  if (bearer_size) {
+    char *h = malloc(bearer_size + 23);
     if (!h) {
       curl_slist_free_all(headers);
-      curl_easy_reset(c);
       return 0;
     }
-    snprintf(h, n, "Authorization: Bearer %s", bearer);
-    if (!strchr(bearer, '\r') && !strchr(bearer, '\n'))
-      headers = curl_slist_append(headers, h);
+    snprintf(h, bearer_size + 23, "Authorization: Bearer %s", bearer);
+    int ok = append_header(&headers, h);
     free(h);
+    if (!ok) {
+      curl_slist_free_all(headers);
+      return 0;
+    }
+  }
+  if (json && !append_header(&headers, "Content-Type: application/json")) {
+    curl_slist_free_all(headers);
+    return 0;
   }
   curl_easy_setopt(c, CURLOPT_URL, url);
 #if LIBCURL_VERSION_NUM >= 0x075500
@@ -609,9 +787,6 @@ static int64_t fetch_response(const char *url, const char *method,
   curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, receive_http);
   curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
-  if (json)
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-  curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
   if (method && (!strcmp(method, "POST") || !strcmp(method, "PUT") ||
                  !strcmp(method, "DELETE"))) {
     curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
@@ -623,10 +798,11 @@ static int64_t fetch_response(const char *url, const char *method,
   curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
   int64_t out = fw_object();
   fw_set(out, "status", fw_number(rc == CURLE_OK ? status : 0));
-  fw_set(out, "data", b.data ? fw_parse(b.data) : 0);
+  fw_set(out, "data",
+         b.data && !memchr(b.data, 0, b.size) ? fw_parse(b.data) : 0);
+  curl_easy_reset(c);
   free(b.data);
   curl_slist_free_all(headers);
-  curl_easy_reset(c);
   return out;
 }
 int64_t fw_fetch(const char *url, const char *method, const char *body,
@@ -661,6 +837,12 @@ static char *b64(const unsigned char *data, size_t n) {
 static unsigned char *unb64(const char *s, size_t n, size_t *out) {
   if (!n || n > 65536 || n % 4 == 1)
     return NULL;
+  const char *alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const char *last = strchr(alphabet, s[n - 1]);
+  if (!last || (n % 4 == 2 && ((last - alphabet) & 15)) ||
+      (n % 4 == 3 && ((last - alphabet) & 3)))
+    return NULL;
   size_t full = ((n + 3) / 4) * 4;
   char *tmp = malloc(full + 1);
   unsigned char *data = track(malloc(full + 1), 0);
@@ -691,6 +873,8 @@ const char *fw_jwt_sign(int64_t claims, const char *secret) {
   if (fw_kind(claims) != 4 || !secret || !*secret)
     return "";
   const char *payload = fw_dump(claims);
+  if (strnlen(secret, 65537) > 65536 || strlen(payload) > 12000)
+    return "";
   char *p = b64((unsigned char *)payload, strlen(payload));
   if (!p)
     return "";
@@ -715,35 +899,45 @@ const char *fw_jwt_sign(int64_t claims, const char *secret) {
   return token;
 }
 int64_t fw_jwt_verify(const char *token, const char *secret) {
-  if (!token || !secret || !*secret || strlen(token) > 16384)
+  if (!token || !secret || !*secret || strnlen(token, 16385) > 16384 ||
+      strnlen(secret, 65537) > 65536)
     return 0;
   const char *a = strchr(token, '.');
   if (!a)
     return 0;
   const char *b = strchr(a + 1, '.');
-  if (!b || strchr(b + 1, '.'))
+  if (!b || strlen(b + 1) != 43 || strchr(b + 1, '.'))
     return 0;
-  size_t hn, pn, sn;
-  unsigned char *header = unb64(token, a - token, &hn),
-                *payload = unb64(a + 1, b - a - 1, &pn),
-                *sig = unb64(b + 1, strlen(b + 1), &sn);
-  if (!header || !payload || !sig || sn != 32 || strlen((char *)header) != hn ||
-      strlen((char *)payload) != pn)
+  size_t sn;
+  unsigned char *sig = unb64(b + 1, 43, &sn);
+  if (!sig || sn != 32)
     return 0;
-  int64_t h = fw_parse((char *)header);
-  if (fw_kind(h) != 4 || strcmp(fw_text(fw_get(h, "alg")), "HS256"))
-    return 0;
+  /* Authenticate the bounded encoded content before spending work on attacker
+   * supplied JSON. The configured algorithm is always HS256, never header-led.
+   */
   unsigned char mac[EVP_MAX_MD_SIZE];
   unsigned int len = 0;
   if (!HMAC(EVP_sha256(), secret, (int)strlen(secret), (unsigned char *)token,
             b - token, mac, &len) ||
       len != sn || CRYPTO_memcmp(mac, sig, sn))
     return 0;
+  size_t hn, pn;
+  unsigned char *header = unb64(token, a - token, &hn),
+                *payload = unb64(a + 1, b - a - 1, &pn);
+  if (!header || !payload || strlen((char *)header) != hn ||
+      strlen((char *)payload) != pn)
+    return 0;
+  int64_t h = fw_parse((char *)header);
+  if (fw_kind(h) != 4 || strcmp(fw_text(fw_get(h, "alg")), "HS256") ||
+      fw_has(h, "crit") || fw_has(h, "b64"))
+    return 0;
   int64_t claims = fw_parse((char *)payload);
   if (fw_kind(claims) != 4 || fw_kind(fw_get(claims, "exp")) != 2 ||
       fw_integer(fw_get(claims, "exp")) <= fw_now() ||
       fw_kind(fw_get(claims, "sub")) != 3 || !*fw_text(fw_get(claims, "sub")) ||
-      fw_kind(fw_get(claims, "role")) != 3)
+      fw_kind(fw_get(claims, "role")) != 3 ||
+      (fw_has(claims, "nbf") && (fw_kind(fw_get(claims, "nbf")) != 2 ||
+                                 fw_integer(fw_get(claims, "nbf")) > fw_now())))
     return 0;
   return claims;
 }
@@ -783,7 +977,136 @@ typedef struct {
   int error, fd, files, finalized;
   size_t file_size;
   char temp[512], extension[8];
+  char ip[INET6_ADDRSTRLEN];
+  int ip_ready, parts_ready;
+  int64_t path_count;
+  char *part_storage;
+  const char *parts[8];
+  char storage[];
 } Request;
+/* Own method, path and a lazy segment scratch buffer in the same allocation
+ * as the request. None of these pointers borrow MHD callback storage. */
+static Request *new_request(struct MHD_Connection *connection, const char *path,
+                            const char *method) {
+  size_t path_size = strlen(path) + 1, method_size = strlen(method) + 1;
+  if (method_size > SIZE_MAX - sizeof(Request) ||
+      path_size > (SIZE_MAX - sizeof(Request) - method_size) / 2)
+    return NULL;
+  Request *r = calloc(1, sizeof(*r) + method_size + 2 * path_size);
+  if (!r)
+    return NULL;
+  r->fd = -1;
+  r->connection = connection;
+  r->method = r->storage;
+  r->path = r->method + method_size;
+  r->part_storage = r->path + path_size;
+  r->path_count = -1;
+  memcpy(r->method, method, method_size);
+  memcpy(r->path, path, path_size);
+  return r;
+}
+#define PROXY_MAX 64u
+typedef struct {
+  unsigned char bytes[16];
+  int family;
+  unsigned prefix;
+} ProxyNetwork;
+static ProxyNetwork trusted_proxies[PROXY_MAX];
+static size_t trusted_proxy_count;
+static int parse_proxy_network(const char *text, ProxyNetwork *out) {
+  char address[INET6_ADDRSTRLEN + 5];
+  size_t length = strlen(text);
+  if (!length || length >= sizeof(address))
+    return 0;
+  memcpy(address, text, length + 1);
+  char *slash = strchr(address, '/');
+  unsigned prefix = 0;
+  if (slash) {
+    *slash++ = 0;
+    if (!*slash)
+      return 0;
+    for (const char *p = slash; *p; p++) {
+      if (!isdigit((unsigned char)*p))
+        return 0;
+      prefix = prefix * 10 + (unsigned)(*p - '0');
+      if (prefix > 128)
+        return 0;
+    }
+  }
+  if (inet_pton(AF_INET, address, out->bytes) == 1) {
+    out->family = AF_INET;
+    out->prefix = slash ? prefix : 32;
+    return out->prefix <= 32;
+  }
+  if (inet_pton(AF_INET6, address, out->bytes) == 1) {
+    out->family = AF_INET6;
+    out->prefix = slash ? prefix : 128;
+    return out->prefix <= 128;
+  }
+  return 0;
+}
+static int configure_proxies(const char *config) {
+  trusted_proxy_count = 0;
+  ProxyNetwork parsed[PROXY_MAX];
+  size_t count = 0;
+  if (!config || !*config)
+    return 1;
+  const char *cursor = config;
+  while (*cursor) {
+    while (isspace((unsigned char)*cursor))
+      cursor++;
+    const char *end = strchr(cursor, ',');
+    if (!end)
+      end = cursor + strlen(cursor);
+    const char *trimmed = end;
+    while (trimmed > cursor && isspace((unsigned char)trimmed[-1]))
+      trimmed--;
+    size_t length = (size_t)(trimmed - cursor);
+    char token[INET6_ADDRSTRLEN + 5];
+    if (!length || length >= sizeof(token) || count == PROXY_MAX)
+      return 0;
+    memcpy(token, cursor, length);
+    token[length] = 0;
+    if (!parse_proxy_network(token, &parsed[count]))
+      return 0;
+    count++;
+    if (!*end) {
+      memcpy(trusted_proxies, parsed, count * sizeof(parsed[0]));
+      trusted_proxy_count = count;
+      return 1;
+    }
+    cursor = end + 1;
+    if (!*cursor)
+      return 0;
+  }
+  return 1;
+}
+static int proxy_matches(const ProxyNetwork *network, int family,
+                         const unsigned char *bytes) {
+  if (network->family != family)
+    return 0;
+  unsigned whole = network->prefix / 8, rest = network->prefix % 8;
+  if (memcmp(network->bytes, bytes, whole))
+    return 0;
+  return !rest ||
+         !((network->bytes[whole] ^ bytes[whole]) & (0xffu << (8 - rest)));
+}
+static int trusted_peer(const struct sockaddr *peer) {
+  const unsigned char *bytes;
+  int family = peer->sa_family;
+  if (family == AF_INET)
+    bytes =
+        (const unsigned char *)&((const struct sockaddr_in *)peer)->sin_addr;
+  else if (family == AF_INET6)
+    bytes =
+        (const unsigned char *)&((const struct sockaddr_in6 *)peer)->sin6_addr;
+  else
+    return 0;
+  for (size_t i = 0; i < trusted_proxy_count; i++)
+    if (proxy_matches(&trusted_proxies[i], family, bytes))
+      return 1;
+  return 0;
+}
 static fw_handler app_handler;
 static volatile sig_atomic_t stopping;
 const char *fw_method(int64_t h) { return h ? P(Request, h)->method : ""; }
@@ -806,43 +1129,73 @@ const char *fw_body(int64_t h) {
 const char *fw_ip(int64_t h) {
   if (!h)
     return "";
+  Request *r = P(Request, h);
+  if (r->ip_ready)
+    return r->ip;
+  r->ip_ready = 1;
   const union MHD_ConnectionInfo *info = MHD_get_connection_info(
-      P(Request, h)->connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+      r->connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
   if (!info || !info->client_addr)
-    return "";
-  char ip[INET6_ADDRSTRLEN];
+    return r->ip;
   struct sockaddr *addr = info->client_addr;
   if (addr->sa_family == AF_INET)
-    inet_ntop(AF_INET, &((struct sockaddr_in *)addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)addr)->sin_addr, r->ip,
+              sizeof(r->ip));
   else if (addr->sa_family == AF_INET6)
-    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)addr)->sin6_addr, ip,
-              sizeof(ip));
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)addr)->sin6_addr, r->ip,
+              sizeof(r->ip));
   else
-    return "";
+    return r->ip;
   const char *proxy = fw_header(h, "X-Real-IP");
-  if (private_ip(ip) && fw_valid(proxy, "ip")) {
+  if (*proxy && trusted_peer(addr) && fw_valid(proxy, "ip")) {
     struct in_addr a;
     struct in6_addr b;
     if (inet_pton(AF_INET, proxy, &a) == 1)
-      inet_ntop(AF_INET, &a, ip, sizeof(ip));
+      inet_ntop(AF_INET, &a, r->ip, sizeof(r->ip));
     else {
       inet_pton(AF_INET6, proxy, &b);
-      inet_ntop(AF_INET6, &b, ip, sizeof(ip));
+      inet_ntop(AF_INET6, &b, r->ip, sizeof(r->ip));
     }
   }
-  return copy(ip);
+  return r->ip;
 }
-const char *fw_segment(int64_t h, int64_t i) { return fw_part(fw_path(h), i); }
+const char *fw_segment(int64_t h, int64_t i) {
+  if (!h || i < 0)
+    return "";
+  Request *r = P(Request, h);
+  if ((uint64_t)i >= sizeof(r->parts) / sizeof(r->parts[0]))
+    return fw_part(r->path, i);
+  if (!r->parts_ready) {
+    memcpy(r->part_storage, r->path, strlen(r->path) + 1);
+    char *part = r->part_storage;
+    while (*part == '/')
+      part++;
+    for (size_t j = 0; j < sizeof(r->parts) / sizeof(r->parts[0]); j++) {
+      r->parts[j] = part;
+      char *slash = strchr(part, '/');
+      if (!slash)
+        break;
+      *slash = 0;
+      part = slash + 1;
+    }
+    r->parts_ready = 1;
+  }
+  return r->parts[i] ? r->parts[i] : "";
+}
 int64_t fw_segments(int64_t h) {
-  const char *s = fw_path(h);
+  if (!h)
+    return 0;
+  Request *r = P(Request, h);
+  if (r->path_count >= 0)
+    return r->path_count;
+  const char *s = r->path;
   if (*s == '/')
     s++;
-  if (!*s)
-    return 0;
-  int n = 1;
+  int64_t n = *s ? 1 : 0;
   while (*s)
     if (*s++ == '/')
       n++;
+  r->path_count = n;
   return n;
 }
 static int64_t response(Request *r, unsigned status, const char *body,
@@ -1055,8 +1408,6 @@ static void completed(void *cls, struct MHD_Connection *connection,
     unlink(r->temp);
   if (r->response)
     MHD_destroy_response(r->response);
-  free(r->method);
-  free(r->path);
   free(r->body);
   free(r->origin);
   free(r);
@@ -1070,16 +1421,10 @@ static enum MHD_Result serve(void *cls, struct MHD_Connection *connection,
   (void)version;
   Request *r = *context;
   if (!r) {
-    r = calloc(1, sizeof(*r));
+    r = new_request(connection, path, method);
     if (!r)
       return MHD_NO;
-    r->fd = -1;
-    r->connection = connection;
-    r->method = strdup(method);
-    r->path = strdup(path);
     *context = r;
-    if (!r->method || !r->path)
-      return MHD_NO;
     const char *type = MHD_lookup_connection_value(connection, MHD_HEADER_KIND,
                                                    "Content-Type");
     if (type && !strncasecmp(type, "multipart/form-data", 19)) {
@@ -1149,6 +1494,40 @@ static void stop_server(int sig) {
   (void)sig;
   stopping = 1;
 }
+/* Runtime feature checks keep the same binary usable when the MHD build or
+ * platform lacks epoll. An explicit mode permits comparable deployment tests.
+ */
+static unsigned polling_flags(const char *mode, int epoll, int poll) {
+  unsigned base = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG;
+  if (!mode || !*mode || !strcmp(mode, "auto")) {
+    if (epoll)
+      return base | MHD_USE_EPOLL;
+    if (poll)
+      return base | MHD_USE_POLL;
+    return base;
+  }
+  if (!strcmp(mode, "epoll"))
+    return base | (epoll ? MHD_USE_EPOLL : poll ? MHD_USE_POLL : 0);
+  if (!strcmp(mode, "poll"))
+    return base | (poll ? MHD_USE_POLL : 0);
+  return !strcmp(mode, "select") ? base : 0;
+}
+static struct MHD_Daemon *start_daemon(unsigned flags, struct sockaddr_in *addr,
+                                       unsigned workers, int connection_threads) {
+  if (connection_threads)
+    return MHD_start_daemon(
+        flags, ntohs(addr->sin_port), NULL, NULL, serve, NULL,
+        MHD_OPTION_SOCK_ADDR, addr, MHD_OPTION_CONNECTION_LIMIT, 256u,
+        MHD_OPTION_CONNECTION_TIMEOUT, 30u,
+        MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
+        MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
+  return MHD_start_daemon(
+      flags, ntohs(addr->sin_port), NULL, NULL, serve, NULL,
+      MHD_OPTION_SOCK_ADDR, addr, MHD_OPTION_THREAD_POOL_SIZE, workers,
+      MHD_OPTION_CONNECTION_LIMIT, 256u, MHD_OPTION_CONNECTION_TIMEOUT, 30u,
+      MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
+      MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
+}
 int64_t fw_run(const char *host, int64_t port, int64_t workers,
                fw_handler handler) {
   if (!host || !handler || port < 1 || port > 65535 || workers < 1 ||
@@ -1159,26 +1538,58 @@ int64_t fw_run(const char *host, int64_t port, int64_t workers,
   addr.sin_port = htons((uint16_t)port);
   if (inet_pton(AF_INET, host, &addr.sin_addr) != 1)
     return 1;
+  if (!configure_proxies(fw_env("FORGE_TRUSTED_PROXIES", ""))) {
+    fprintf(stderr, "Invalid FORGE_TRUSTED_PROXIES: use comma-separated "
+                    "IPs/CIDRs (max 64)\n");
+    return 1;
+  }
   pthread_once(&curl_once, init_curl);
   if (!curl_ready)
     return 1;
+  const char *threads = fw_env("FORGE_WEB_THREADS", "connection");
+  int connection_threads = !strcmp(threads, "connection");
+  if (!connection_threads && strcmp(threads, "pool")) {
+    fprintf(stderr, "Invalid FORGE_WEB_THREADS: use connection or pool\n");
+    return 1;
+  }
   app_handler = handler;
   stopping = 0;
   signal(SIGTERM, stop_server);
   signal(SIGINT, stop_server);
   signal(SIGPIPE, SIG_IGN);
-  struct MHD_Daemon *d = MHD_start_daemon(
-      MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG, (uint16_t)port, NULL,
-      NULL, serve, NULL, MHD_OPTION_SOCK_ADDR, &addr,
-      MHD_OPTION_THREAD_POOL_SIZE, (unsigned int)workers,
-      MHD_OPTION_CONNECTION_LIMIT, 256u, MHD_OPTION_CONNECTION_TIMEOUT, 30u,
-      MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)128 * 1024,
-      MHD_OPTION_NOTIFY_COMPLETED, completed, NULL, MHD_OPTION_END);
+  unsigned flags =
+      polling_flags(fw_env("FORGE_WEB_POLL", "auto"),
+                    MHD_is_feature_supported(MHD_FEATURE_EPOLL) == MHD_YES,
+                    MHD_is_feature_supported(MHD_FEATURE_POLL) == MHD_YES);
+  if (!flags) {
+    fprintf(stderr,
+            "Invalid FORGE_WEB_POLL: use auto, epoll, poll or select\n");
+    return 1;
+  }
+  /* A synchronous handler must not block other connections sharing its poller.
+   * MHD's connection threads support poll/select, but not epoll or a pool. */
+  if (connection_threads) {
+    if (flags & MHD_USE_EPOLL) {
+      flags &= ~MHD_USE_EPOLL;
+      if (MHD_is_feature_supported(MHD_FEATURE_POLL) == MHD_YES)
+        flags |= MHD_USE_POLL;
+    }
+    flags |= MHD_USE_THREAD_PER_CONNECTION | MHD_USE_ITC;
+  }
+  struct MHD_Daemon *d = start_daemon(flags, &addr, (unsigned)workers, connection_threads);
+  if (!d && (flags & (MHD_USE_EPOLL | MHD_USE_POLL))) {
+    flags = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG |
+            (connection_threads ? MHD_USE_THREAD_PER_CONNECTION | MHD_USE_ITC : 0);
+    d = start_daemon(flags, &addr, (unsigned)workers, connection_threads);
+  }
   if (!d) {
     return 1;
   }
-  fprintf(stderr, "Forge portfolio API listening on %s:%lld\n", host,
-          (long long)port);
+  fprintf(stderr, "Forge portfolio API listening on %s:%lld (threads=%s, polling=%s)\n",
+          host, (long long)port, threads,
+          flags & MHD_USE_EPOLL  ? "epoll"
+          : flags & MHD_USE_POLL ? "poll"
+                                 : "select");
   while (!stopping) {
     struct timespec delay = {0, 100000000};
     nanosleep(&delay, NULL);
@@ -1308,7 +1719,7 @@ const char *fw_cookie(int64_t request, const char *name) {
 int64_t fw_set_cookie(int64_t request, const char *name, const char *value,
                       int64_t age, int64_t secure) {
   Request *r = P(Request, request);
-  if (!r || !r->response || age < 0 || age > 86400)
+  if (!r || !r->response || !name || !*name || !value || age < 0 || age > 86400)
     return 0;
   for (const char *p = name; *p; p++)
     if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-'))

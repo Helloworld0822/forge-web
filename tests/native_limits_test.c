@@ -56,8 +56,56 @@ static void test_buffers(void) {
   assert(!reserve_buffer(&json, &capacity, JSON_MAX + 2, JSON_MAX));
   free(json);
 }
+static void test_request_paths(void) {
+  const char *paths[] = {"",
+                         "/",
+                         "//",
+                         "/api/posts",
+                         "///api//posts/",
+                         "one/two/three/four/five/six/seven/eight/nine/ten",
+                         "/a/"};
+  for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+    Request *r = new_request(NULL, paths[i], "POST");
+    assert(r && r->fd == -1);
+    assert(!strcmp(fw_path(H(r)), paths[i]));
+    assert(!strcmp(fw_method(H(r)), "POST"));
+    int64_t expected = 0;
+    const char *text = paths[i];
+    if (*text == '/')
+      text++;
+    if (*text)
+      expected = 1;
+    while (*text)
+      if (*text++ == '/')
+        expected++;
+    assert(fw_segments(H(r)) == expected);
+    assert(fw_segments(H(r)) == expected);
+    for (int64_t j = -1; j < 14; j++) {
+      fw_scope_begin();
+      const char *actual = fw_segment(H(r), j);
+      assert(!strcmp(actual, fw_part(paths[i], j)));
+      if (j >= 0 && j < 8)
+        assert(actual == fw_segment(H(r), j));
+      fw_scope_end();
+      if (j >= 0 && j < 8)
+        assert(!strcmp(actual, fw_segment(H(r), j)));
+    }
+    assert(!strcmp(r->path, paths[i]));
+    free(r);
+  }
+  unsigned base = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG;
+  assert(polling_flags("auto", 1, 1) == (base | MHD_USE_EPOLL));
+  assert(polling_flags("auto", 0, 1) == (base | MHD_USE_POLL));
+  assert(polling_flags("auto", 0, 0) == base);
+  assert(polling_flags("epoll", 0, 1) == (base | MHD_USE_POLL));
+  assert(polling_flags("epoll", 0, 0) == base);
+  assert(polling_flags("poll", 1, 1) == (base | MHD_USE_POLL));
+  assert(polling_flags("select", 1, 1) == base);
+  assert(polling_flags("invalid", 1, 1) == 0);
+}
 int main(void) {
   test_buffers();
+  test_request_paths();
   assert(!fw_rate(NULL, 1, 1));
   assert(!fw_rate("invalid", 0, 1));
   assert(fw_rate("empty-window", 2, 3600));

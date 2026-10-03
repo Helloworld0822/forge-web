@@ -1,0 +1,125 @@
+{
+  "baseline": "7e2684d",
+  "conditions": "GCC11.4-O2,2CPUquota,sharedAMD-BC250,5alternatingrounds,20k12KiBforgedHS256tokens; nativeDoSmicrobenchNOTapplicationRPS",
+  "samples": {
+    "before": [
+      {
+        "accepted_before_fixes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.533858962
+      },
+      {
+        "accepted_before_fixes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.533842917
+      },
+      {
+        "accepted_before_fixes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.536868519
+      },
+      {
+        "accepted_before_fixes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.551524986
+      },
+      {
+        "accepted_before_fixes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.549773686
+      }
+    ],
+    "after": [
+      {
+        "accepted_before_fixes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.236262465
+      },
+      {
+        "accepted_before_fixes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.232944335
+      },
+      {
+        "accepted_before_fixes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.2316936
+      },
+      {
+        "accepted_before_fixes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.214703921
+      },
+      {
+        "accepted_before_fixes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "invalid_jwt_checks": 20000,
+        "invalid_jwt_seconds": 0.230433176
+      }
+    ]
+  },
+  "median_seconds": {
+    "before": 0.536868519,
+    "after": 0.2316936
+  },
+  "speedup": 2.317148678254384
+}
