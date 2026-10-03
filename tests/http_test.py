@@ -53,12 +53,13 @@ def main():
     parser.add_argument('--image', default='forge-platform-release:local')
     parser.add_argument('--trusted-proxies', default='')
     parser.add_argument('--polling', default='auto', choices=['auto', 'select', 'poll', 'epoll'])
+    parser.add_argument('--threads', default='pool', choices=['pool', 'connection'])
     args = parser.parse_args()
     build = str(Path(args.build).resolve())
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Echo)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
-    base = ['docker', 'run', '--rm', '--network', 'host', '-v', f'{build}:/build:ro', args.image]
+    base = ['docker', 'run', '--rm', '--no-healthcheck', '--network', 'host', '-v', f'{build}:/build:ro', args.image]
     subprocess.run(base + ['/build/http_client_test', f'http://127.0.0.1:{server.server_port}'], check=True)
     server.shutdown()
     server.server_close()
@@ -66,7 +67,7 @@ def main():
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     name = f'forge-web-native-http-test-{port}'
-    process = subprocess.Popen(base[:2] + ['--name', name, '-e', f'FORGE_WEB_POLL={args.polling}', '-e', f'FORGE_TRUSTED_PROXIES={args.trusted_proxies}'] + base[2:] + ['/build/http_server_test', str(port)])
+    process = subprocess.Popen(base[:2] + ['--name', name, '-e', f'FORGE_WEB_THREADS={args.threads}', '-e', f'FORGE_WEB_POLL={args.polling}', '-e', f'FORGE_TRUSTED_PROXIES={args.trusted_proxies}'] + base[2:] + ['/build/http_server_test', str(port)])
     try:
         for attempt in range(100):
             try:

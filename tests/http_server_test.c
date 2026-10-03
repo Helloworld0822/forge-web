@@ -3,7 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <time.h>
 static int64_t handler(int64_t request) {
+  if (!strcmp(fw_path(request), "/slow")) {
+    fprintf(stderr, "SLOW_STARTED\n");
+    struct timespec delay = {1, 0};
+    while (nanosleep(&delay, &delay) && errno == EINTR) {}
+  }
   const char *ip = fw_ip(request);
   assert(ip == fw_ip(request));
   int64_t result = fw_object();
@@ -18,5 +25,7 @@ static int64_t handler(int64_t request) {
   return fw_respond(request, 200, fw_dump(result));
 }
 int main(int argc, char **argv) {
-  return argc == 2 ? (int)fw_run("127.0.0.1", atoi(argv[1]), 2, handler) : 1;
+  return argc == 2 || argc == 3
+      ? (int)fw_run("127.0.0.1", atoi(argv[1]), argc == 3 ? atoi(argv[2]) : 2, handler)
+      : 1;
 }
